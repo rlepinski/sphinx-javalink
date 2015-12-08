@@ -4,27 +4,12 @@ import os
 import zipfile
 
 from javatools import ziputils
+from javatools.jarinfo import JarInfo
 
 from .model import LinkableClass, Package, parse_name
 
-def extract_class(jar, name):
-    """Extracts a LinkableClass from a jar.
-
-    Args:
-        jar: An open ZipFile instance.
-        name: A string containing the binary name of a class.
-
-    Raises:
-        KeyError: The class does not exist in the jar.
-    """
-
-    with jar.open(name) as entry:
-        return LinkableClass(javatools.unpack_class(entry))
-
-
 def is_jar(path):
     return path.endswith('.jar') and zipfile.is_zipfile(path)
-
 
 def expand_classpath_entry(entry):
     if os.path.isdir(entry) or is_jar(entry):
@@ -36,16 +21,6 @@ def expand_classpath_entry(entry):
     else:
         raise ValueError('Invalid classpath entry: {}'.format(entry))
 
-
-def open_classpath_entry(entry):
-    if os.path.isdir(entry):
-        return ExplodedZipFile(entry)
-    elif is_jar(entry):
-        return zipfile.ZipFile(entry, 'r')
-    else:
-        raise ValueError('Invalid classpath entry: {}'.format(entry))
-
-
 class ClassLoader(object):
     def __init__(self, paths):
         entries = [expand_classpath_entry(p) for p in paths]
@@ -54,33 +29,24 @@ class ClassLoader(object):
         # {Package : {class name : LinkableClass}}
         self.packages = {}
 
+        # Parse entries
+        for entry in self.entries:
+            with JarInfo(filename=entry) as jar_info:
+                for class_path in jar_info.get_classes():
+                    class_info = jar_info.get_classinfo(class_path)
+                    package, class_name = parse_name(class_info.get_this(), '/')
+
+                    # Cache the class
+                    classes = self.packages.setdefault(package, {})
+                    classes[class_name] = LinkableClass(class_info)
+
     def load(self, name):
         package, class_name = parse_name(name)
 
         try:
             return self.packages[package][class_name]
         except KeyError:
-            clazz = self.find(name)
-            if clazz and (clazz.package != package or clazz.name != class_name):
-                msg = "Wanted class '{}', but '{}' was loaded"
-                raise ValueError(msg.format(name, clazz))
-
-            classes = self.packages.setdefault(package, {})
-            classes[class_name] = clazz
-            return clazz
-
-    def find(self, name):
-        package, class_name = parse_name(name)
-        path = package.get_member_path(class_name)
-
-        for entry in self.entries:
-            with open_classpath_entry(entry) as jar:
-                try:
-                    return extract_class(jar, path)
-                except KeyError:
-                    pass
-
-        return None
+            return None
 
     # TODO take either a Package or a string name
     def find_package(self, name):
@@ -88,19 +54,8 @@ class ClassLoader(object):
 
         if package in self.packages:
             return package
-
-        for entry in self.entries:
-            with open_classpath_entry(entry) as jar:
-                try:
-                    jar.getinfo(package.path)
-                except KeyError:
-                    pass
-                else:
-                    # TODO avoid changing state in find method
-                    self.packages[package] = {}
-                    return package
-
-        return None
+        else:
+            return None
 
 
 class ExplodedZipFile(ziputils.ExplodedZipFile):
